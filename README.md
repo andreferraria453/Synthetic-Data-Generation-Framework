@@ -40,6 +40,8 @@ python -m rae_experiment.sampling.generate_sana_sprint --batches 5
 python -m rae_experiment.sampling.generate_bar --batches 5
 ```
 
-`--batch-size` define as imagens por batch e `--warmup-batches` define o aquecimento. `--output-dir` guarda apenas as imagens medidas. Os modelos SANA aceitam `--prompt` e `--steps`. O SANA-Sprint usa BF16 e requer uma GPU com suporte nativo. O BAR usa `--class-id` e regista as 1024 posições autorregressivas na coluna `steps`.
+`--batch-size` define as imagens por batch e `--warmup-batches` define o aquecimento. `--output-dir` guarda apenas as imagens medidas. Os modelos SANA aceitam `--prompt` e `--steps`. O SANA-Sprint usa BF16 por omissão. Na T4, usa `--precision fp16`, como na célula do Colab. O CSV regista a precisão selecionada. O BAR usa `--class-id` e regista as 1024 posições autorregressivas na coluna `steps`.
 
 O carregamento inclui o acesso à cache, eventuais downloads e a transferência para a GPU. O tempo total de geração soma apenas os batches medidos, incluindo descodificação e conversão para imagem. A escrita de PNG fica fora da medição. A média e o desvio-padrão populacional usam o tempo de cada batch dividido pelo batch size. Para observar a latência de imagens individuais, usa `--batch-size 1`. O pico de VRAM é a memória CUDA alocada pelo PyTorch durante a fase medida, incluindo os pesos residentes.
+
+A célula do SANA-Sprint no Colab mede um batch em FP16 para validar a execução na T4. Na A6000, corre o script com `--precision bf16 --batches 5` e usa os resultados dessa GPU para comparar desempenho.

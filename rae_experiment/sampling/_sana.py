@@ -10,6 +10,7 @@ def run_sana(pipeline_name, *, model, checkpoint, resolution, precision, default
     add_run_arguments(parser)
     parser.add_argument("--prompt", default="A photograph of a golden retriever in a park")
     parser.add_argument("--steps", type=int, default=default_steps)
+    parser.add_argument("--precision", choices=("fp16", "bf16"), default=precision)
     args = parser.parse_args()
     if args.steps < 1:
         parser.error("--steps must be positive.")
@@ -18,7 +19,7 @@ def run_sana(pipeline_name, *, model, checkpoint, resolution, precision, default
         import diffusers
         import torch
 
-        dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+        dtype = torch.bfloat16 if args.precision == "bf16" else torch.float16
         pipeline_class = getattr(diffusers, pipeline_name)
         pipeline = pipeline_class.from_pretrained(checkpoint, torch_dtype=dtype).to("cuda")
         pipeline.set_progress_bar_config(disable=True)
@@ -35,6 +36,6 @@ def run_sana(pipeline_name, *, model, checkpoint, resolution, precision, default
         return generate
 
     measure_generation(
-        args, load, model=model, checkpoint=checkpoint, precision=precision,
+        args, load, model=model, checkpoint=checkpoint, precision=args.precision,
         resolution=f"{resolution}x{resolution}", steps=args.steps,
     )
