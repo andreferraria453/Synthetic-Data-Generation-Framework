@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     add_run_arguments(parser)
     parser.add_argument("--class-id", type=int, default=207)
+    parser.add_argument("--precision", choices=("fp32", "fp16"), default="fp32")
     args = parser.parse_args()
     if not 0 <= args.class_id < 1000:
         parser.error("--class-id must be in [0, 999].")
@@ -42,17 +43,26 @@ def main():
         tokenizer = get_pretrained_tokenizer(config).to("cuda")
         generator = BAR(config)
         generator.load_state_dict(torch.load(generator_path, map_location="cpu"))
-        generator.eval().requires_grad_(False).to("cuda")
+        # Inference mode disables gradients while preserving autocast's weight cache.
+        generator.eval().to("cuda")
+        use_fp16 = args.precision == "fp16"
+        if use_fp16:
+            # Upstream applies CFG and Gumbel sampling to these logits.
+            generator.lm_head.output_embed.register_forward_hook(
+                lambda _module, _inputs, logits: logits.float()
+            )
 
         def generate():
             labels = torch.full((args.batch_size,), args.class_id, device="cuda", dtype=torch.long)
-            tokens = generator.generate(
-                condition=labels,
-                guidance_scale=4.2,
-                randomize_temperature=2.8,
-                kv_cache=True,
-                tokens_allocation=list(settings.mbm_head.tokens_allocation),
-            )
+            # Upstream RoPE and RMSNorm already compute internally in FP32.
+            with torch.autocast("cuda", dtype=torch.float16, enabled=use_fp16):
+                tokens = generator.generate(
+                    condition=labels,
+                    guidance_scale=4.2,
+                    randomize_temperature=2.8,
+                    kv_cache=True,
+                    tokens_allocation=list(settings.mbm_head.tokens_allocation),
+                )
             pixels = ((tokenizer.decode_tokens(tokens) + 1) / 2).clamp(0, 1)
             pixels = (pixels * 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
             return [Image.fromarray(image) for image in pixels]
@@ -62,7 +72,7 @@ def main():
     measure_generation(
         args, load, model="BAR-L-res512",
         checkpoint=f"{COLLECTION}/{GENERATOR}; {COLLECTION}/{TOKENIZER}",
-        precision="fp32", resolution="512x512", steps=settings.image_seq_len,
+        precision=args.precision, resolution="512x512", steps=settings.image_seq_len,
     )
 
 
