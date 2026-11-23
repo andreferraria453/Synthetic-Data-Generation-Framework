@@ -1,3 +1,6 @@
 [submodule "vendor/RAE"]
 	path = vendor/RAE
 	url = https://github.com/bytetriper/RAE.git
+[submodule "vendor/BAR"]
+	path = vendor/BAR
+	url = https://github.com/amazon-far/BAR.git

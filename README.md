@@ -29,3 +29,17 @@ python -m rae_experiment.training.prepare_lora --rank 8
 `models` carrega configurações e checkpoints, `representations` carrega o RAE congelado, `sampling` contém as duas CLIs e `training` prepara LoRA nas projeções QKV do DiT através de PEFT. A preparação devolve o RAE congelado e o DiT com adaptadores treináveis para um futuro ciclo de adaptação.
 
 `data`, `latent_space`, `conditioning`, `alignment`, `objectives` e `evaluation` reservam espaço para experiências futuras.
+
+## Desempenho da geração
+
+Num runtime CUDA, inicializa os submodules e instala `requirements.txt`. Os scripts usam os checkpoints oficiais e acrescentam uma linha por execução a `outputs/generation_performance.csv`.
+
+```bash
+python -m rae_experiment.sampling.generate_sana --batches 5
+python -m rae_experiment.sampling.generate_sana_sprint --batches 5
+python -m rae_experiment.sampling.generate_bar --batches 5
+```
+
+`--batch-size` define as imagens por batch e `--warmup-batches` define o aquecimento. `--output-dir` guarda apenas as imagens medidas. Os modelos SANA aceitam `--prompt` e `--steps`. O SANA-Sprint usa BF16 e requer uma GPU com suporte nativo. O BAR usa `--class-id` e regista as 1024 posições autorregressivas na coluna `steps`.
+
+O carregamento inclui o acesso à cache, eventuais downloads e a transferência para a GPU. O tempo total de geração soma apenas os batches medidos, incluindo descodificação e conversão para imagem. A escrita de PNG fica fora da medição. A média e o desvio-padrão populacional usam o tempo de cada batch dividido pelo batch size. Para observar a latência de imagens individuais, usa `--batch-size 1`. O pico de VRAM é a memória CUDA alocada pelo PyTorch durante a fase medida, incluindo os pesos residentes.
