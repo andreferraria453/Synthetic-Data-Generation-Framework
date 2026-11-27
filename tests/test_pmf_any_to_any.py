@@ -14,6 +14,7 @@ from rae_experiment.any_to_any.data import CorrosionDataset, read_boxes
 from rae_experiment.any_to_any.flow import Task, edit_region, generate, loss
 from rae_experiment.any_to_any.metrics import frechet, kid
 from rae_experiment.any_to_any.model import AnyToAnyPMF, MODALITIES, load_backbone
+from rae_experiment.any_to_any.preflight import audit_rgb
 from rae_experiment.any_to_any.train import epoch_loss, smoke
 
 
@@ -120,3 +121,20 @@ class Integration(unittest.TestCase):
             self.assertGreater(scores["loss_global"], 0)
             self.assertAlmostEqual(scores["loss_global"], scores["loss_rgb"])
             self.assertEqual(scores["target_rgb_frequency"], 1)
+
+    def test_rgb_boxes_audit_and_validation_protocol(self):
+        model = AnyToAnyPMF(load_backbone(self.backbone), ("rgb", "boxes"), slots=3, rank=2)
+        item = self.sample()
+        audit = audit_rgb(model, {key: val[None] for key, val in item.items()})
+        self.assertLess(audit["rgb_jvp_relative_error"], 0.08)
+        scores = epoch_loss(
+            model, DataLoader([item] * 4), torch.Generator().manual_seed(17), random.Random(1),
+            torch.device("cpu"), False, rgb_boxes=True,
+        )
+        self.assertEqual(scores["task_noise_to_rgb_boxes_frequency"], 0.25)
+        self.assertEqual(scores["task_rgb_to_boxes_frequency"], 0.25)
+        self.assertEqual(scores["task_boxes_to_rgb_frequency"], 0.25)
+        self.assertEqual(scores["task_noise_to_rgb_frequency"], 0.25)
+        self.assertGreater(scores["loss_rgb_unweighted"], 0)
+        self.assertLessEqual(scores["loss_rgb"], 1.0)
+        self.assertGreater(scores["loss_boxes_unweighted"], 0)

@@ -12,7 +12,7 @@ from rae_experiment.sampling.generate_pmf import CHECKPOINT, REVISION, VARIANT
 MODALITIES = ("rgb", "boxes", "dino", "depth")
 
 
-def load_backbone(local_dir=None, offline=False):
+def load_backbone(local_dir=None, offline=False, *, strict=False):
     from diffusers.utils.dynamic_modules_utils import get_class_from_dynamic_module
     from huggingface_hub import snapshot_download
 
@@ -27,7 +27,13 @@ def load_backbone(local_dir=None, offline=False):
         local_dir, "transformer_pmf.py", class_name="PMFTransformer2DModel",
         local_files_only=True,
     )
-    return model_class.from_pretrained(local_dir, local_files_only=True)
+    if not strict:
+        return model_class.from_pretrained(local_dir, local_files_only=True)
+    backbone, info = model_class.from_pretrained(local_dir, local_files_only=True, output_loading_info=True)
+    problems = {key: entries for key, entries in info.items() if entries}
+    if problems:
+        raise RuntimeError(f"Could not load the full pMF checkpoint: {problems}")
+    return backbone
 
 
 class LoRALinear(nn.Module):

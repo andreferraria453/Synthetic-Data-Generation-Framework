@@ -1,0 +1,14 @@
+{
+  "protocol": "rgb_boxes",
+  "seed": 0,
+  "validation_seed": 17,
+  "epochs": 50,
+  "microbatch": 1,
+  "effective_batch_size": 8,
+  "checkpoint_every": 1,
+  "learning_rate": 0.0001,
+  "gradient_checkpointing": true,
+  "overfit_images": 4,
+  "overfit_updates": 64,
+  "model": {"modalities": ["rgb", "boxes"], "slots": 32, "rank": 8}
+}

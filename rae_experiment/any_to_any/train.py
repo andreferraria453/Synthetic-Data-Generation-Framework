@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from .data import CorrosionDataset, build_manifest
-from .flow import Task, choose_task, edit_region, generate, loss
+from .flow import RGB_BOX_TASKS, Task, choose_task, edit_region, generate, loss
 from .model import AnyToAnyPMF, load_backbone
 
 
@@ -47,7 +47,8 @@ def precision_context(device, use_bf16):
     return torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16)
 
 
-def smoke(model, train, valid, optimizer, output, experiment_id, use_bf16, device, seed):
+def smoke(model, train, valid, optimizer, output, experiment_id, use_bf16, device, seed,
+          *, rgb_boxes=False):
     """Exercise training gradients and joint/conditional sampling on the real batch."""
     model.train()
     keys = model.modalities
@@ -63,13 +64,15 @@ def smoke(model, train, valid, optimizer, output, experiment_id, use_bf16, devic
             tasks.extend((Task(rest, (name,)), Task((name,), rest)))
     if "rgb" in keys:
         tasks.extend((Task((), ("rgb",)), Task((), ("rgb",), edit=True)))
+    if rgb_boxes:
+        tasks = tuple(RGB_BOX_TASKS.values())
     rows = []
     for task in tasks:
         model.train()
         optimizer.zero_grad(set_to_none=True)
         with precision_context(device, use_bf16):
-            total, _ = loss(model, batch, task, generator=rng)
-        if not torch.isfinite(total):
+            total, components = loss(model, batch, task, generator=rng, balanced=rgb_boxes)
+        if not torch.isfinite(total) or not all(torch.isfinite(value) for value in components.values()):
             raise FloatingPointError(f"Nonfinite smoke loss for {task}")
         total.backward()
         grad = torch.nn.utils.clip_grad_norm_(
@@ -98,21 +101,31 @@ def smoke(model, train, valid, optimizer, output, experiment_id, use_bf16, devic
     report = {"signature": experiment_id, "device": str(device), "bf16": use_bf16,
               "peak_vram_mib": torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else None,
               "tasks": rows}
-    write_json(report, output / "smoke.json")
-    print(json.dumps(report, indent=2))
+    if not rgb_boxes:
+        write_json(report, output / "smoke.json")
+        print(json.dumps(report, indent=2))
+    return report
 
 
-def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None, accumulation=1):
+def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None, accumulation=1,
+               rgb_boxes=False):
     training = optimizer is not None
     model.train(training)
     values, counts, usage = defaultdict(float), Counter(), Counter()
     params = [param for param in model.parameters() if param.requires_grad]
+    task_names = tuple(RGB_BOX_TASKS)
+    gradient_total = gradient_peak = updates = 0
     for index, item in enumerate(loader):
         batch = move(item, device)
-        task = choose_task(model.modalities, task_rng)
+        if rgb_boxes:
+            name = task_rng.choice(task_names) if training else task_names[index % len(task_names)]
+            task = RGB_BOX_TASKS[name]
+            usage[f"task_{name}"] += len(batch["rgb"])
+        else:
+            task = choose_task(model.modalities, task_rng)
         with torch.set_grad_enabled(training), precision_context(device, use_bf16):
-            total, components = loss(model, batch, task, generator=rng)
-        if not torch.isfinite(total):
+            total, components = loss(model, batch, task, generator=rng, balanced=rgb_boxes)
+        if not torch.isfinite(total) or not all(torch.isfinite(value) for value in components.values()):
             raise FloatingPointError(f"Nonfinite loss at batch {index} for {task}")
         size = len(batch["rgb"])
         for name, score in ({"global": total} | components).items():
@@ -128,14 +141,20 @@ def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None
             group_size = min(accumulation, len(loader) - index // accumulation * accumulation)
             (total / group_size).backward()
             if (index + 1) % accumulation == 0 or index + 1 == len(loader):
-                torch.nn.utils.clip_grad_norm_(params, 1.0, error_if_nonfinite=True)
+                gradient = torch.nn.utils.clip_grad_norm_(params, 1.0, error_if_nonfinite=True).item()
+                gradient_total += gradient
+                gradient_peak = max(gradient_peak, gradient)
+                updates += 1
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
         done = index + 1
         if done == 1 or done % 25 == 0 or done == len(loader):
             phase = "Treino" if training else "Validação da loss"
             print(f"{phase}: {done}/{len(loader)} batches | "
-                  f"loss média {values['global'] / counts['global']:.4f}", flush=True)
+                  f"loss média {values['global'] / counts['global']:.4g}"
+                  + "".join(f" | {key} {values[key] / counts[key]:.4g}"
+                            for key in ("rgb", "boxes", "rgb_unweighted", "boxes_unweighted")
+                            if counts[key]), flush=True)
     result = {f"loss_{name}": values[name] / counts[name] for name in counts}
     for role in ("condition", "target"):
         for name in model.modalities:
@@ -143,6 +162,12 @@ def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None
             result[f"{key}_frequency"] = usage[key] / counts["global"]
     if "rgb" in model.modalities:
         result["condition_rgb_visible_frequency"] = usage["condition_rgb_visible"] / counts["global"]
+    if rgb_boxes:
+        for name in task_names:
+            result[f"task_{name}_frequency"] = usage[f"task_{name}"] / counts["global"]
+        if training:
+            result.update(gradient_norm=gradient_total / updates, gradient_norm_max=gradient_peak,
+                          learning_rate=optimizer.param_groups[0]["lr"], optimizer_updates=updates)
     return result
 
 
@@ -150,7 +175,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--dataset", type=Path, required=True)
-    parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--cache", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--backbone", type=Path, help="Local pinned Diffusers transformer directory.")
     parser.add_argument("--offline", action="store_true")
@@ -160,9 +185,16 @@ def main():
     parser.add_argument("--resume", type=Path)
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    rgb_boxes = config.get("protocol") == "rgb_boxes"
+    if rgb_boxes and tuple(config["model"]["modalities"]) != ("rgb", "boxes"):
+        parser.error("The RGB/boxes protocol requires exactly RGB and boxes.")
+    if not rgb_boxes and args.cache is None and set(config["model"]["modalities"]) & {"dino", "depth"}:
+        parser.error("--cache is required for DINO or depth.")
     manifest = build_manifest(args.dataset)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_bf16 = device.type == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False)
+    if rgb_boxes:
+        use_bf16 = False
     if args.train and device.type != "cuda":
         parser.error("The full experiment requires CUDA.")
     experiment_id = signature(config | {"backbone": str(args.backbone.resolve()) if args.backbone else None},
@@ -172,13 +204,18 @@ def main():
         report = json.loads(receipt.read_text()) if receipt.is_file() else {}
         if report.get("signature") != experiment_id or report.get("device") != "cuda":
             parser.error("Complete --smoke on CUDA with this config, checkpoint and dataset first.")
+        if rgb_boxes and (not report.get("overfit", {}).get("passed")
+                          or report.get("precision") != "fp32"):
+            parser.error("The RGB/boxes audit and overfit must pass before training.")
         if args.resume is None and (args.output / "epochs").exists():
             parser.error("Use --resume or choose a new run directory.")
     torch.manual_seed(config["seed"])
     print(f"A carregar pMF em {device} ({'BF16 autocast' if use_bf16 else 'FP32'})", flush=True)
-    backbone = load_backbone(args.backbone, args.offline)
+    backbone = load_backbone(args.backbone, args.offline, strict=rgb_boxes)
     if (backbone.sample_size, backbone.patch_size, backbone.hidden_size, backbone.depth) != (512, 32, 1024, 32):
         parser.error("Expected the pMF-L/32-512 transformer.")
+    if rgb_boxes and backbone.v_final_layer is not None:
+        parser.error("The RGB/boxes protocol uses the original inference checkpoint without auxiliary v.")
     model = AnyToAnyPMF(backbone, **config["model"]).to(device)
     model.pmf.gradient_checkpointing = config["gradient_checkpointing"]
     data = {split: CorrosionDataset(
@@ -194,7 +231,25 @@ def main():
     if args.smoke:
         split_loaders = [DataLoader(Subset(data[split], range(microbatch)), batch_size=microbatch)
                          for split in ("train", "valid")]
-        smoke(model, *split_loaders, optimizer, args.output, experiment_id, use_bf16, device, config["seed"])
+        if rgb_boxes:
+            from .preflight import audit_rgb, overfit
+
+            write_json({"signature": experiment_id, "status": "running"}, args.output / "smoke.json")
+            audit = audit_rgb(model, move(next(iter(split_loaders[0])), device))
+            overfit_report = overfit(
+                model, data["train"], optimizer, device, images=config["overfit_images"],
+                updates=config["overfit_updates"], seed=config["seed"],
+            )
+            report = smoke(model, *split_loaders, optimizer, args.output, experiment_id,
+                           use_bf16, device, config["seed"], rgb_boxes=True)
+            report.update(audit=audit, precision="fp32", overfit=overfit_report)
+            write_json(report, args.output / "smoke.json")
+            print(json.dumps(report), flush=True)
+            if not report["overfit"]["passed"]:
+                raise RuntimeError("Overfit loss failed to decrease in all four configurations.")
+        else:
+            smoke(model, *split_loaders, optimizer, args.output, experiment_id,
+                  use_bf16, device, config["seed"])
         return
     from .metrics import Validator
 
@@ -206,8 +261,13 @@ def main():
     )
     reference = DataLoader(Subset(data["train"], reference_ids), batch_size=1)
     print("A preparar modelos e referências para as métricas de validação", flush=True)
-    validator = Validator(model, reference, device, offline=args.offline,
-                          seed=config["validation_seed"])
+    if rgb_boxes:
+        from .rgb_boxes_metrics import RGBBoxesValidator
+
+        validator = RGBBoxesValidator(device, config["validation_seed"])
+    else:
+        validator = Validator(model, reference, device, offline=args.offline,
+                              seed=config["validation_seed"])
     rng = torch.Generator(device=device).manual_seed(config["seed"])
     tasks = random.Random(config["seed"])
     first_epoch = 1
@@ -222,19 +282,23 @@ def main():
         training.generator.set_state(checkpoint["shuffle_rng"])
         first_epoch = checkpoint["epoch"] + 1
 
+    if rgb_boxes and args.resume is None:
+        first_epoch = 0
     for epoch in range(first_epoch, config["epochs"] + 1):
         print(f"Época {epoch}/{config['epochs']}", flush=True)
         torch.cuda.reset_peak_memory_stats(device)
         start = perf_counter()
-        train_scores = epoch_loss(model, training, rng, tasks, device, use_bf16, optimizer=optimizer,
-                                  accumulation=config["effective_batch_size"] // microbatch)
+        train_scores = epoch_loss(
+            model, training, rng, tasks, device, use_bf16, optimizer=optimizer,
+            accumulation=config["effective_batch_size"] // microbatch, rgb_boxes=rgb_boxes,
+        ) if epoch else {}
         torch.cuda.synchronize(device)
-        timing = {"train_seconds": perf_counter() - start,
+        timing = {"train_seconds": perf_counter() - start if epoch else 0.0,
                   "train_peak_vram_mib": torch.cuda.max_memory_allocated(device) / 2**20}
         torch.cuda.reset_peak_memory_stats(device)
         val_seed = config["validation_seed"]
         val_scores = epoch_loss(model, validation, torch.Generator(device=device).manual_seed(val_seed),
-                                random.Random(val_seed), device, use_bf16)
+                                random.Random(val_seed), device, use_bf16, rgb_boxes=rgb_boxes)
         scores = validator.evaluate(model, validation, args.output / "examples" / f"{epoch:03}")
         timing["validation_peak_vram_mib"] = torch.cuda.max_memory_allocated(device) / 2**20
         row = {"epoch": epoch, "train": train_scores, "validation": val_scores, "metrics": scores} | timing

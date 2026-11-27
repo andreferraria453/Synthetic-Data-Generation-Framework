@@ -14,6 +14,14 @@ class Task:
     edit: bool = False
 
 
+RGB_BOX_TASKS = {
+    "noise_to_rgb_boxes": Task((), ("rgb", "boxes")),
+    "rgb_to_boxes": Task(("rgb",), ("boxes",)),
+    "boxes_to_rgb": Task(("boxes",), ("rgb",)),
+    "noise_to_rgb": Task((), ("rgb",)),
+}
+
+
 def choose_task(modalities, rng: random.Random):
     active = set(modalities)
     if "rgb" in active:
@@ -48,22 +56,31 @@ def edit_region(rgb, boxes, presence):
     return torch.where(mask.flatten(1).any(1)[:, None, None], mask, center)[:, None]
 
 
-def loss(model, batch, task, *, generator=None, epsilon=1e-6):
+def loss(model, batch, task, *, generator=None, epsilon=1e-6, balanced=False):
     keys = task.targets
     rgb = batch["rgb"]
-    random = torch.rand((3, len(rgb)), device=rgb.device, generator=generator)
-    t = 0.05 + 0.94 * random[0]
-    r = torch.where(random[1] < 0.25, t, t * random[2])
+    if balanced:
+        pair = (0.8 * torch.randn((2, len(rgb)), device=rgb.device, generator=generator)).sigmoid()
+        t, r = pair.amax(0), pair.amin(0)
+        # Sample the official diagonal fraction across microbatches, including batch 1.
+        diagonal = torch.rand(len(rgb), device=rgb.device, generator=generator) < 0.5
+        r = torch.where(diagonal, t, r)
+    else:
+        random = torch.rand((3, len(rgb)), device=rgb.device, generator=generator)
+        t = 0.05 + 0.94 * random[0]
+        r = torch.where(random[1] < 0.25, t, t * random[2])
     edit = edit_region(rgb, batch["boxes"], batch["presence"]) if task.edit else None
     clean = {name: batch[name].float() for name in keys}
-    noisy, velocity = {}, {}
+    noisy, velocity, directions = {}, {}, {}
     for name, value in clean.items():
         noise = torch.randn(value.shape, device=value.device, generator=generator)
         noise = noise * (4.0 if name == "rgb" else 1.0)
         if name == "rgb" and edit is not None:
             noise = torch.where(edit, noise, value)
         noisy[name] = torch.lerp(value, noise, expand_time(t, value))
-        velocity[name] = noise - value
+        directions[name] = velocity[name] = noise - value
+        if balanced and name == "rgb":
+            velocity[name] = (noisy[name] - value) / expand_time(t.clamp_min(model.pmf.t_clip_min), value)
     fixed = {name: batch[name] for name in task.conditions}
 
     def velocity_prediction(time, *states, auxiliary=False):
@@ -76,7 +93,6 @@ def loss(model, batch, task, *, generator=None, epsilon=1e-6):
 
     # Fixed conditions and r have zero tangent. Only noisy target states and t move.
     # If the conversion ships v weights, retain the pretrained RGB v head and its loss.
-    directions = dict(velocity)
     if "rgb" in keys and model.pmf.v_final_layer is not None:
         with torch.no_grad():
             _, auxiliary = model(fixed | noisy, keys, t, t, edit=edit, metadata=batch, auxiliary=True)
@@ -90,7 +106,7 @@ def loss(model, batch, task, *, generator=None, epsilon=1e-6):
             (torch.ones_like(t), *(directions[name] for name in keys)),
         )
     predictions, extras = velocity_prediction(t, *(noisy[name] for name in keys), auxiliary=True)
-    components = {}
+    components, raw = {}, {}
     for name, average, tangent in zip(keys, predictions, derivative):
         compound = average + expand_time(t - r, average) * tangent.detach()
         error = (compound - velocity[name]).square()
@@ -100,25 +116,36 @@ def loss(model, batch, task, *, generator=None, epsilon=1e-6):
         if name == "rgb" and edit is not None:
             weight = weight * edit
         squared = (error * weight).flatten(1).sum(1)
+        count = weight.flatten(1).sum(1).clamp_min(1)
+        mse = (squared / count).mean()
         if name == "rgb":
-            component = (squared / (squared.detach() + epsilon).pow(0.5)).mean()
+            raw["rgb_unweighted"] = mse.detach()
+            if balanced:
+                component = (squared / (squared.detach() + 0.01)).mean()
+            else:
+                component = (squared / (squared.detach() + epsilon).pow(0.5)).mean()
             if "rgb_v" in extras:
                 v = (noisy[name] - extras["rgb_v"].float()) / expand_time(t, rgb)
                 residual = ((v - velocity[name]).square() * weight).flatten(1).sum(1)
                 component = component + (residual / (residual.detach() + epsilon).pow(0.5)).mean()
         else:
-            component = (squared / weight.flatten(1).sum(1).clamp_min(1)).mean()
+            component = mse
         if name == "boxes":
-            component = component + F.cross_entropy(extras[name].transpose(1, 2), batch["box_classes"])
+            ce = F.cross_entropy(extras[name].transpose(1, 2), batch["box_classes"])
+            raw["boxes_geometry_unweighted"] = mse.detach()
+            raw["boxes_class_ce"] = ce.detach()
+            component = component + ce
+            raw["boxes_unweighted"] = component.detach()
         elif name == "dino":
             component = component + F.cross_entropy(extras[name].transpose(1, 2), batch["presence"].long())
         components[name] = component
-    return torch.stack(tuple(components.values())).mean(), components
+    return torch.stack(tuple(components.values())).mean(), components | raw
 
 
 @torch.no_grad()
 def generate(model, conditions, target_shapes, *, batch_size, generator, metadata=None,
-             edit=None, original_rgb=None, labels=None):
+             edit=None, original_rgb=None, labels=None, omega=1.0,
+             guidance_min=0.0, guidance_max=1.0):
     """Generate all requested outputs in one shared Transformer evaluation."""
     targets = tuple(target_shapes)
     if not targets or set(conditions) & set(targets):
@@ -134,7 +161,8 @@ def generate(model, conditions, target_shapes, *, batch_size, generator, metadat
         inputs["rgb"] = torch.where(edit, inputs["rgb"], original_rgb)
     t = torch.ones(batch_size, device=device)
     predictions, logits = model(inputs, targets, t, torch.zeros_like(t), edit=edit,
-                                labels=labels, metadata=metadata)
+                                labels=labels, metadata=metadata, omega=omega,
+                                guidance_min=guidance_min, guidance_max=guidance_max)
     if edit is not None:
         logits["rgb_edit_raw"] = predictions["rgb"]
         predictions["rgb"] = torch.where(edit, predictions["rgb"], original_rgb)
