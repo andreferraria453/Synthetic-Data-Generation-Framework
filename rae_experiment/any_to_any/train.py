@@ -148,7 +148,6 @@ def main():
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--backbone", type=Path, help="Local pinned Diffusers transformer directory.")
-    parser.add_argument("--detector", type=Path, help="Local train-only RF100 detector.")
     parser.add_argument("--offline", action="store_true")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--smoke", action="store_true")
@@ -201,7 +200,7 @@ def main():
     )
     reference = DataLoader(Subset(data["train"], reference_ids), batch_size=1)
     validator = Validator(model, reference, device, offline=args.offline,
-                          detector_path=args.detector, seed=config["validation_seed"])
+                          seed=config["validation_seed"])
     rng = torch.Generator(device=device).manual_seed(config["seed"])
     tasks = random.Random(config["seed"])
     first_epoch = 1

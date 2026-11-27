@@ -1,6 +1,5 @@
 """Deterministic validation protocols for the original RF100 validation split."""
 
-from pathlib import Path
 from time import perf_counter
 
 import torch
@@ -45,7 +44,7 @@ def box_outputs(boxes, logits, no_object):
 
 
 class Validator:
-    def __init__(self, model, train_reference, device, *, offline, detector_path, seed):
+    def __init__(self, model, train_reference, device, *, offline, seed):
         self.modalities = model.modalities
         self.device = device
         self.seed = seed
@@ -68,13 +67,9 @@ class Validator:
             self.dino = AutoModel.from_pretrained(DINO, local_files_only=offline).eval().to(device)
             self.lpips = lpips.LPIPS(net="alex", spatial=True).eval().to(device)
             self.reference_dino = torch.cat([self.dino_features(item["rgb"].to(device)) for item in train_reference])
-        if {"rgb", "boxes"} <= set(self.modalities) and detector_path is not None:
+        if {"rgb", "boxes"} <= set(self.modalities):
             from torchmetrics.detection import MeanAveragePrecision
-            from ultralytics import YOLO
 
-            if not Path(detector_path).is_file():
-                raise FileNotFoundError(detector_path)
-            self.detector = YOLO(str(detector_path))
             self.consistency = MeanAveragePrecision(box_format="xyxy")
 
     @torch.inference_mode()
@@ -133,19 +128,15 @@ class Validator:
                     montage = torch.cat((rgb[:1], generated[:1], edited[:1])).add(1).mul(0.5)
                     save_image(montage, example_dir / "rgb_reference_generated_edit.png", nrow=3)
 
-            if hasattr(self, "detector"):
+            if {"rgb", "boxes"} <= set(shapes):
                 predicted = box_outputs(outputs["boxes"], logits["boxes"], model.classes)
-                images = [image.permute(1, 2, 0).cpu().numpy()[..., ::-1].copy()
-                          for image in pixels(outputs["rgb"])]
-                results = self.detector.predict(images, conf=0.001, verbose=False, device=str(self.device))
-                if tuple(str(results[0].names[i]).lower() for i in range(model.classes)) != (
-                    "slippage", "corrosion", "crack",
-                ):
-                    raise ValueError("Detector class order must match the RF100 export.")
-                detected = [dict(boxes=result.boxes.xyxyn.cpu(), labels=result.boxes.cls.long().cpu(),
-                                 scores=result.boxes.conf.cpu()) for result in results]
-                self.consistency.update(detected, [{k: v for k, v in sample.items() if k != "scores"}
-                                                   for sample in predicted])
+                recovered, recovered_logits = generate(
+                    model, {"rgb": outputs["rgb"].clamp(-1, 1)}, {"boxes": shapes["boxes"]}, **kwargs,
+                )
+                recovered_boxes = box_outputs(recovered["boxes"], recovered_logits["boxes"], model.classes)
+                self.consistency.update(recovered_boxes, [
+                    {"boxes": sample["boxes"], "labels": sample["labels"]} for sample in predicted
+                ])
 
             paired = {name: shape for name, shape in shapes.items() if name != "rgb"}
             if paired:
@@ -183,6 +174,4 @@ class Validator:
                 scores[f"{prefix}_map50"] = results["map_50"].item() if results["map_50"].item() >= 0 else None
                 scores[f"{prefix}_map50_95"] = results["map"].item() if results["map"].item() >= 0 else None
                 metric.reset()
-        if {"rgb", "boxes"} <= set(self.modalities) and not hasattr(self, "detector"):
-            scores.update(box_rgb_consistency_map50=None, box_rgb_consistency_map50_95=None)
         return scores | {"inference_steps": 1}

@@ -74,11 +74,9 @@ validação, usando uma subamostra de treino fixa com o mesmo tamanho. Os
 resultados são específicos deste protocolo pequeno e domínio.
 
 A avaliação de boxes utiliza COCO mAP sobre RGB real condicionado.
-A consistência de geração conjunta usa um detector YOLO independente,
-com os três nomes na ordem RF100, aplicado às imagens geradas e comparado
-com as boxes geradas. Um checkpoint Ultralytics treinado exclusivamente no split train pode ser
-passado com --detector. Sem ele, as métricas de consistência ficam sem valor
-e o treino e o mAP normal de boxes continuam disponíveis. DINO e profundidade são avaliados em reconstrução
+A consistência de geração conjunta mede o mAP entre as boxes geradas em
+conjunto com RGB e as boxes que o próprio pMF prevê a partir desse RGB.
+É uma medida de autoconsistência, sem confirmação visual independente. DINO e profundidade são avaliados em reconstrução
 condicionada por RGB. LPIPS espacial é agregado dentro e fora do retângulo
 sobre a saída bruta, antes da cópia de pixels imóveis, para que o score
 exterior não seja trivialmente zero. O PNG de edição mostra a saída final.
