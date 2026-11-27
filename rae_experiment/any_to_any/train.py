@@ -131,6 +131,11 @@ def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None
                 torch.nn.utils.clip_grad_norm_(params, 1.0, error_if_nonfinite=True)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+        done = index + 1
+        if done == 1 or done % 25 == 0 or done == len(loader):
+            phase = "Treino" if training else "Validação da loss"
+            print(f"{phase}: {done}/{len(loader)} batches | "
+                  f"loss média {values['global'] / counts['global']:.4f}", flush=True)
     result = {f"loss_{name}": values[name] / counts[name] for name in counts}
     for role in ("condition", "target"):
         for name in model.modalities:
@@ -170,6 +175,7 @@ def main():
         if args.resume is None and (args.output / "epochs").exists():
             parser.error("Use --resume or choose a new run directory.")
     torch.manual_seed(config["seed"])
+    print(f"A carregar pMF em {device} ({'BF16 autocast' if use_bf16 else 'FP32'})", flush=True)
     backbone = load_backbone(args.backbone, args.offline)
     if (backbone.sample_size, backbone.patch_size, backbone.hidden_size, backbone.depth) != (512, 32, 1024, 32):
         parser.error("Expected the pMF-L/32-512 transformer.")
@@ -199,6 +205,7 @@ def main():
         range(len(data["train"])), len(data["valid"]),
     )
     reference = DataLoader(Subset(data["train"], reference_ids), batch_size=1)
+    print("A preparar modelos e referências para as métricas de validação", flush=True)
     validator = Validator(model, reference, device, offline=args.offline,
                           seed=config["validation_seed"])
     rng = torch.Generator(device=device).manual_seed(config["seed"])
@@ -216,6 +223,7 @@ def main():
         first_epoch = checkpoint["epoch"] + 1
 
     for epoch in range(first_epoch, config["epochs"] + 1):
+        print(f"Época {epoch}/{config['epochs']}", flush=True)
         torch.cuda.reset_peak_memory_stats(device)
         start = perf_counter()
         train_scores = epoch_loss(model, training, rng, tasks, device, use_bf16, optimizer=optimizer,

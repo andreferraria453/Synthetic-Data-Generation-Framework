@@ -156,6 +156,9 @@ class Validator:
                     delta = recovered["depth"].clamp(0, 1) - target
                     accumulate("depth_absrel", (delta.abs() / target.clamp_min(1e-3))[target > 1e-3])
                     accumulate("depth_mse", delta.square())
+            done = index + 1
+            if done == 1 or done % 25 == 0 or done == len(loader):
+                print(f"Métricas de validação: {done}/{len(loader)} batches", flush=True)
         scores = {name: total / counts[name] for name, total in sums.items() if counts[name]}
         if "depth_mse" in scores:
             scores["depth_rmse"] = scores.pop("depth_mse") ** 0.5
