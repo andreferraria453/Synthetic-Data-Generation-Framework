@@ -1,0 +1,6 @@
+-r requirements.txt
+torchmetrics
+lpips
+pycocotools
+ultralytics
+matplotlib
