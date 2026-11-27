@@ -115,7 +115,7 @@ def epoch_loss(model, loader, rng, task_rng, device, use_bf16, *, optimizer=None
         if not torch.isfinite(total):
             raise FloatingPointError(f"Nonfinite loss at batch {index} for {task}")
         size = len(batch["rgb"])
-        for name, score in {"global": total} | components.items():
+        for name, score in ({"global": total} | components).items():
             values[name] += score.detach().item() * size
             counts[name] += size
         for name in task.conditions:

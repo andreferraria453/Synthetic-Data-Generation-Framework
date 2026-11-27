@@ -3,6 +3,7 @@
 import itertools
 import os
 from pathlib import Path
+import random
 import tempfile
 import unittest
 
@@ -13,7 +14,7 @@ from rae_experiment.any_to_any.data import CorrosionDataset, read_boxes
 from rae_experiment.any_to_any.flow import Task, edit_region, generate, loss
 from rae_experiment.any_to_any.metrics import frechet, kid
 from rae_experiment.any_to_any.model import AnyToAnyPMF, MODALITIES, load_backbone
-from rae_experiment.any_to_any.train import smoke
+from rae_experiment.any_to_any.train import epoch_loss, smoke
 
 
 class UnitTests(unittest.TestCase):
@@ -107,3 +108,15 @@ class Integration(unittest.TestCase):
             self.assertTrue((Path(directory) / "smoke.json").exists())
         self.assertTrue(all(parameter.grad is None for parameter in self.model.parameters()
                             if not parameter.requires_grad))
+
+    def test_epoch_aggregates_global_and_modality_losses(self):
+        loader = DataLoader([self.sample()])
+        optimizer = torch.optim.AdamW([p for p in self.model.parameters() if p.requires_grad], lr=1e-4)
+        for options in ({"optimizer": optimizer}, {}):
+            scores = epoch_loss(
+                self.model, loader, torch.Generator().manual_seed(17), random.Random(1),
+                torch.device("cpu"), False, **options,
+            )
+            self.assertGreater(scores["loss_global"], 0)
+            self.assertAlmostEqual(scores["loss_global"], scores["loss_rgb"])
+            self.assertEqual(scores["target_rgb_frequency"], 1)
