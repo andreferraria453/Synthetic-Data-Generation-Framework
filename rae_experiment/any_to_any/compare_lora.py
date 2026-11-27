@@ -123,7 +123,7 @@ def prototype(args):
         optimizer = torch.optim.AdamW(trainable, lr=1e-4)
         rng = torch.Generator(device=device).manual_seed(args.seed)
         order = random.Random(args.seed)
-        tasks = tuple(RGB_BOX_TASKS.values())
+        tasks = tuple(RGB_BOX_TASKS.items())
         loss_sums, loss_counts = defaultdict(float), defaultdict(int)
         gradient_norms = []
         train_seconds = 0.0
@@ -133,7 +133,7 @@ def prototype(args):
                 if (step - 1) % len(indices) == 0:
                     order.shuffle(indices)
                 batch = batches[indices[(step - 1) % len(indices)]]
-                task = tasks[(step - 1) % len(tasks)]
+                task_name, task = tasks[(step - 1) % len(tasks)]
                 model.train()
                 synchronize(device)
                 start = perf_counter()
@@ -150,7 +150,11 @@ def prototype(args):
                 for name, value in ({"global": total} | parts).items():
                     loss_sums[name] += value.item()
                     loss_counts[name] += 1
+                if args.steps <= 10 or step == 1 or step % 10 == 0 or step == args.steps:
+                    print(f"{label} | treino {step}/{args.steps} | {task_name} "
+                          f"| loss {total.item():.5g} | grad pré-clipping {grad:.5g}", flush=True)
             if step % args.interval == 0 or step == args.steps:
+                print(f"{label} | avaliação {step}/{args.steps}", flush=True)
                 row = {"step": step, "train_seconds": train_seconds,
                        "loss": {name: value / loss_counts[name] for name, value in loss_sums.items()},
                        "gradient_norm_mean": sum(gradient_norms) / len(gradient_norms) if gradient_norms else None,
