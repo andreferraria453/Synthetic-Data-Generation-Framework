@@ -68,12 +68,12 @@ class Validator:
             self.dino = AutoModel.from_pretrained(DINO, local_files_only=offline).eval().to(device)
             self.lpips = lpips.LPIPS(net="alex", spatial=True).eval().to(device)
             self.reference_dino = torch.cat([self.dino_features(item["rgb"].to(device)) for item in train_reference])
-        if {"rgb", "boxes"} <= set(self.modalities):
+        if {"rgb", "boxes"} <= set(self.modalities) and detector_path is not None:
             from torchmetrics.detection import MeanAveragePrecision
             from ultralytics import YOLO
 
-            if detector_path is None or not Path(detector_path).is_file():
-                raise ValueError("Provide a local RF100 detector trained on train only for box/RGB consistency.")
+            if not Path(detector_path).is_file():
+                raise FileNotFoundError(detector_path)
             self.detector = YOLO(str(detector_path))
             self.consistency = MeanAveragePrecision(box_format="xyxy")
 
@@ -133,7 +133,7 @@ class Validator:
                     montage = torch.cat((rgb[:1], generated[:1], edited[:1])).add(1).mul(0.5)
                     save_image(montage, example_dir / "rgb_reference_generated_edit.png", nrow=3)
 
-            if {"rgb", "boxes"} <= set(shapes):
+            if hasattr(self, "detector"):
                 predicted = box_outputs(outputs["boxes"], logits["boxes"], model.classes)
                 images = [image.permute(1, 2, 0).cpu().numpy()[..., ::-1].copy()
                           for image in pixels(outputs["rgb"])]
@@ -183,4 +183,6 @@ class Validator:
                 scores[f"{prefix}_map50"] = results["map_50"].item() if results["map_50"].item() >= 0 else None
                 scores[f"{prefix}_map50_95"] = results["map"].item() if results["map"].item() >= 0 else None
                 metric.reset()
+        if {"rgb", "boxes"} <= set(self.modalities) and not hasattr(self, "detector"):
+            scores.update(box_rgb_consistency_map50=None, box_rgb_consistency_map50_95=None)
         return scores | {"inference_steps": 1}
