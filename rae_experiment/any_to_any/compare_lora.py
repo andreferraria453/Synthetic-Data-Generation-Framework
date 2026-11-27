@@ -1,4 +1,4 @@
-"""Compare shared LoRA and UniVidX-style DGL on 16 annotated RF100 images."""
+"""Compare shared LoRA and UniVidX-style DGL on annotated RF100 images."""
 
 import argparse
 from collections import defaultdict
@@ -7,6 +7,7 @@ import random
 from time import perf_counter
 
 import torch
+from PIL import Image
 from torchvision.ops import box_iou
 
 from .data import CorrosionDataset, build_manifest
@@ -21,6 +22,34 @@ from .train import write_json
 def synchronize(device):
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+@torch.no_grad()
+def reconstruct(model, batches, output, device, seed):
+    model.eval()
+    output.mkdir(parents=True, exist_ok=True)
+    rng = torch.Generator(device=device).manual_seed(seed)
+    empty = {"boxes": (), "labels": ()}
+    errors = []
+    for batch in batches:
+        rgb = batch["rgb"].float()
+        t = rgb.new_full((len(rgb),), 0.5)
+        noise = torch.randn(rgb.shape, device=device, generator=rng) * model.rgb_noise_scale
+        noisy = torch.lerp(rgb, noise, 0.5)
+        prediction, _ = model({"rgb": noisy}, ("rgb",), t, torch.zeros_like(t), metadata=batch)
+        restored = prediction["rgb"].float()
+        if not restored.isfinite().all():
+            raise FloatingPointError("Nonfinite RGB reconstruction")
+        for original, corrupted, reconstruction in zip(rgb, noisy, restored):
+            comparison = Image.new("RGB", (original.shape[-1] * 3, original.shape[-2]))
+            for column, (image, title) in enumerate(zip(
+                (original, corrupted, reconstruction),
+                ("Original", "Com ruido (t=0.5)", "Reconstrucao"),
+            )):
+                comparison.paste(panel(image, empty, empty, title), (column * original.shape[-1], 0))
+            errors.append((original - reconstruction).square().mean().item())
+            comparison.save(output / f"{len(errors):04}.png")
+    return sum(errors) / len(errors)
 
 
 def evaluate(model, batches, output, device, seed):
@@ -92,7 +121,9 @@ def prototype(args):
     torch.set_num_threads(args.threads)
     manifest = build_manifest(args.dataset)
     annotated = [row for row in manifest["train"] if (args.dataset / row[1]).read_text().strip()]
-    selected = random.Random(args.seed).sample(annotated, 16)
+    if not 1 <= args.num_images <= len(annotated):
+        raise ValueError(f"--num-images must be between 1 and {len(annotated)}.")
+    selected = random.Random(args.seed).sample(annotated, args.num_images)
     args.output.mkdir(parents=True, exist_ok=True)
     write_json({"seed": args.seed, "batch_size": args.batch_size, "steps": args.steps,
                 "backbone": str(args.backbone) if args.backbone else "pMF-B-32 (pinned cache)",
@@ -158,8 +189,18 @@ def prototype(args):
                 row = {"step": step, "train_seconds": train_seconds,
                        "loss": {name: value / loss_counts[name] for name, value in loss_sums.items()},
                        "gradient_norm_mean": sum(gradient_norms) / len(gradient_norms) if gradient_norms else None,
-                       "gradient_norm_max": max(gradient_norms, default=None),
-                       "inference": evaluate(model, batches, directory / f"{step:04}", device, args.seed)}
+                       "gradient_norm_max": max(gradient_norms, default=None)}
+                if step == args.steps:
+                    torch.save({
+                        "step": step, "protocol": metadata,
+                        "trainable": {name: param.detach().cpu() for name, param in model.named_parameters()
+                                      if param.requires_grad},
+                    }, directory / f"{step:04}_weights.pt")
+                row["inference"] = evaluate(model, batches, directory / f"{step:04}", device, args.seed)
+                if step in (0, args.steps):
+                    row["reconstruction_mse"] = reconstruct(
+                        model, batches, directory / f"{step:04}" / "reconstructions", device, args.seed,
+                    )
                 write_json(row, directory / f"{step:04}.json")
                 print(f"{label}: {step}/{args.steps} | {row['loss']} | {train_seconds:.2f} s", flush=True)
                 loss_sums.clear()
@@ -176,6 +217,7 @@ def main():
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--interval", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--num-images", type=int, default=16, help="Number of annotated training images.")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--threads", type=int, default=4)
