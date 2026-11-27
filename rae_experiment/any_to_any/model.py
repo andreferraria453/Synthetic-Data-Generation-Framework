@@ -1,6 +1,7 @@
 """Add modality tokens around the original pMF transformer blocks."""
 
 from contextvars import ContextVar
+from inspect import signature
 from pathlib import Path
 
 import torch
@@ -25,9 +26,14 @@ def load_backbone(local_dir=None, offline=False, *, strict=False, variant=VARIAN
         )
         local_dir = Path(root) / variant / "transformer"
     local_dir = str(Path(local_dir).resolve())
+    # Older Diffusers loads the local module implicitly. Newer versions expose
+    # an explicit opt-in even for a module in a pinned, local snapshot.
+    dynamic_options = {}
+    if "trust_remote_code" in signature(get_class_from_dynamic_module).parameters:
+        dynamic_options["trust_remote_code"] = True
     model_class = get_class_from_dynamic_module(
         local_dir, "transformer_pmf.py", class_name="PMFTransformer2DModel",
-        local_files_only=True,
+        local_files_only=True, **dynamic_options,
     )
     if not strict:
         return model_class.from_pretrained(local_dir, local_files_only=True)
