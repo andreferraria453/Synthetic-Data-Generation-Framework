@@ -207,8 +207,14 @@ class AnyToAnyPMF(nn.Module):
         for name in targets:
             tokens = hidden[:, sections[name]]
             if name == "rgb":
-                predictions[name] = pmf._unpatchify(pmf.u_final_layer(tokens) + self.rgb_output(tokens))
+                residual_input = pmf.u_final_layer.norm(tokens) if self.adapter != "legacy" else tokens
+                predictions[name] = pmf._unpatchify(
+                    pmf.u_final_layer(tokens) + self.rgb_output(residual_input),
+                )
             else:
+                if name == "boxes" and self.adapter != "legacy":
+                    # Match the bounded input scale of the pretrained RGB head.
+                    tokens = F.rms_norm(tokens, (tokens.shape[-1],), eps=1e-6)
                 prediction = self.outputs[name](tokens)
                 if name == "depth":
                     prediction = F.fold(
