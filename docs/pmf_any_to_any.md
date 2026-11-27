@@ -6,7 +6,7 @@ Abre **notebooks/pmf_any_to_any_colab.ipynb** com um runtime T4 e disponibiliza 
 clone com a extensão e o export YOLO que já temos. Ajusta REPO, DATASET, CACHE
 e RUN no notebook. Para conservar a cache e os checkpoints entre sessões,
 coloca CACHE e RUN no Drive. O smoke usa microbatch 1 em FP32 na T4 e regista
-o pico de memória CUDA alocada. O notebook não tem uma célula de treino completo.
+o pico de memória CUDA alocada. A célula **Treino completo** exige o smoke e arranca apenas quando START_TRAINING está ativo.
 
 A cópia Windows auditada é **C:/DAOP2/daop/datasets/corrosion-bi3q3**.
 Usa os papéis originais do export Roboflow v1, com 840 treino, 304 validação
