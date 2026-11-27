@@ -74,7 +74,7 @@ def loss(model, batch, task, *, generator=None, epsilon=1e-6, balanced=False):
     noisy, velocity, directions = {}, {}, {}
     for name, value in clean.items():
         noise = torch.randn(value.shape, device=value.device, generator=generator)
-        noise = noise * (4.0 if name == "rgb" else 1.0)
+        noise = noise * (getattr(model, "rgb_noise_scale", 4.0) if name == "rgb" else 1.0)
         if name == "rgb" and edit is not None:
             noise = torch.where(edit, noise, value)
         noisy[name] = torch.lerp(value, noise, expand_time(t, value))
@@ -156,7 +156,7 @@ def generate(model, conditions, target_shapes, *, batch_size, generator, metadat
     inputs = dict(conditions)
     for name, shape in target_shapes.items():
         noise = torch.randn((batch_size, *shape), device=device, generator=generator)
-        inputs[name] = noise * (4.0 if name == "rgb" else 1.0)
+        inputs[name] = noise * (getattr(model, "rgb_noise_scale", 4.0) if name == "rgb" else 1.0)
     if edit is not None:
         inputs["rgb"] = torch.where(edit, inputs["rgb"], original_rgb)
     t = torch.ones(batch_size, device=device)

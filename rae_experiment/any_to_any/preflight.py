@@ -6,20 +6,23 @@ from .flow import RGB_BOX_TASKS, generate, loss
 
 
 @torch.no_grad()
-def audit_rgb(model, batch):
+def audit_rgb(model, batch, *, omega=7.5, guidance_min=0.2, guidance_max=0.6):
     """Check the untouched RGB one-step path and the velocity derivative."""
     model.eval()
     rgb = batch["rgb"]
     rng = torch.Generator(device=rgb.device).manual_seed(413)
     state = rng.get_state()
-    noise = 4 * torch.randn(rgb.shape, device=rgb.device, generator=rng)
+    noise = getattr(model, "rgb_noise_scale", 4.0) * torch.randn(
+        rgb.shape, device=rgb.device, generator=rng,
+    )
     labels = torch.full((len(rgb),), 207, dtype=torch.long, device=rgb.device)
     t = torch.ones(len(rgb), device=rgb.device)
-    original = model.pmf(noise, t, labels, h=t, omega=t * 7.5,
-                         guidance_interval_min=t * 0.2, guidance_interval_max=t * 0.6).u
+    original = model.pmf(noise, t, labels, h=t, omega=t * omega,
+                         guidance_interval_min=t * guidance_min, guidance_interval_max=t * guidance_max).u
     rng.set_state(state)
     outputs, _ = generate(model, {}, {"rgb": rgb.shape[1:]}, batch_size=len(rgb),
-                          labels=labels, generator=rng, omega=7.5, guidance_min=0.2, guidance_max=0.6)
+                          labels=labels, generator=rng, omega=omega,
+                          guidance_min=guidance_min, guidance_max=guidance_max)
     expected = noise - original
     torch.testing.assert_close(outputs["rgb"], expected, rtol=1e-4, atol=2e-5)
     noisy, direction = torch.lerp(rgb, noise, 0.6), noise - rgb
